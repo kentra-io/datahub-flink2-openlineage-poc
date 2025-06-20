@@ -12,6 +12,7 @@ All deployed locally using Docker Compose
 - Kafka 4.0
 - Kafka UI
 - Schema Registry
+- Kafka Rest Proxy
 
 ### Flink 2.0
 - Flink jobmanager
@@ -73,7 +74,8 @@ This is what you should see:
 
 ## Custom-built openlineage-flink jar
 
-This project contains a custom-built openlineage-flink jar containing a bugfix that makes it possible.
+This project contains a custom-built openlineage-flink jar containing a bugfix that makes it possible. Hopefully it's merged
+to OpenLineage soon.
 
 Code it's built from is published on Github as a PR to the OpenLineage project:
 https://github.com/OpenLineage/OpenLineage/pull/3799
