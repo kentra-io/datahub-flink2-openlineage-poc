@@ -1,0 +1,14 @@
+transport:
+  type: http
+  url: http://request-logger-proxy:80/openapi/openlineage/api/v1/lineage
+dataset:
+  kafka:
+    resolveTopicPattern: true
+  namespaceResolvers:
+    kafka-prod:
+      type: hostList
+      hosts: ['kafka:9094']
+      schema: kafka
+facets:
+  symlinks:
+    disabled: true

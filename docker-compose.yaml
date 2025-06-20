@@ -1,0 +1,404 @@
+networks:
+  default:
+    name: datahub_network
+services:
+  #### Kafka and Kafka UI
+  kafka:
+    image: docker.io/bitnami/kafka:4.0
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_CLUSTER_ID=lkorDA4qT6W1K_dk0LHvtg
+      # Start Kraft Setup (Kafka as Controller - no Zookeeper)
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_BROKER_ID=1
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@127.0.0.1:9093
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_LOG_DIRS=/tmp/logs
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,INTERNAL://:9094
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:9092,INTERNAL://kafka:9094
+    healthcheck:
+      interval: 3s
+      retries: 10
+      start_period: 5s
+      test: [ "CMD", "kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092" ]
+      timeout: 5s
+    volumes:
+      - "kafka_data:/bitnami"
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8090:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local-docker-kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9094
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    networks:
+      - default
+
+  schema-registry:
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      - SCHEMA_REGISTRY_HOST_NAME=schema-registry
+      - SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL=PLAINTEXT
+      - SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS=kafka:9094
+    healthcheck:
+      interval: 3s
+      retries: 10
+      start_period: 5s
+      test: nc -z schema-registry 8081
+      timeout: 5s
+    hostname: schema-registry
+    image: confluentinc/cp-schema-registry:7.9.2
+    ports:
+      - "8081:8081"
+  kafka-rest-proxy:
+    image: confluentinc/cp-kafka-rest:7.9.2
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8085:8082" # Expose the REST Proxy port to your host
+    environment:
+      KAFKA_REST_BOOTSTRAP_SERVERS: 'PLAINTEXT://kafka:9094'
+      KAFKA_REST_LISTENERS: "http://0.0.0.0:8082"
+      KAFKA_REST_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+    networks:
+      - default
+  #### Flink 2.0.0 with OpenLineage
+  flink-jobmanager:
+    image: flink:2.0.0
+    depends_on:
+      - kafka
+      - schema-registry
+    expose:
+      - "6123"
+    ports:
+      - "8082:8081" # conflict with schema-registry on 8081
+      - "8083:8083"
+    command: |
+      bash -c "  
+      /opt/flink/bin/jobmanager.sh start-foreground &
+      /opt/flink/bin/sql-gateway.sh start-foreground
+      "
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
+      OPENLINEAGE_CONFIG: /opt/flink/conf/openlineage.yml
+      FLINK_PROPERTIES: |
+        execution.job-status-changed-listeners: io.openlineage.flink.listener.OpenLineageJobStatusChangedListenerFactory
+        sql-gateway.endpoint.rest.address: 0.0.0.0  
+        sql-gateway.endpoint.rest.port: 8083
+    volumes:
+      - ./resources/flink-openlineage.http.yaml:/opt/flink/conf/openlineage.yml
+      - ./flink-jars/flink-sql-connector-kafka-4.0.0-2.0.jar:/opt/flink/lib/flink-sql-connector-kafka-4.0.0-2.0.jar
+      - ./flink-jars/openlineage-flink-1.35.0-SNAPSHOT.jar:/opt/flink/lib/openlineage-flink-1.35.0-SNAPSHOT.jar
+      - ./flink-jars/kafka-clients-4.0.0.jar:/opt/flink/lib/kafka-clients-4.0.0.jar
+  flink-taskmanager:
+    image: flink:2.0.0
+    expose:
+      - "6121"
+      - "6122"
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+    links:
+      - "flink-jobmanager:flink-jobmanager"
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
+      OPENLINEAGE_CONFIG: /opt/flink/conf/openlineage.yml
+      FLINK_PROPERTIES: |
+        execution.job-status-changed-listeners: io.openlineage.flink.listener.OpenLineageJobStatusChangedListenerFactory
+    volumes:
+      - ./resources/flink-openlineage.http.yaml:/opt/flink/conf/openlineage.yml
+      - ./flink-jars/flink-sql-connector-kafka-4.0.0-2.0.jar:/opt/flink/lib/flink-sql-connector-kafka-4.0.0-2.0.jar
+      - ./flink-jars/openlineage-flink-1.35.0-SNAPSHOT.jar:/opt/flink/lib/openlineage-flink-1.35.0-SNAPSHOT.jar
+      - ./flink-jars/kafka-clients-4.0.0.jar:/opt/flink/lib/kafka-clients-4.0.0.jar
+
+  #### DataHub Services
+  datahub-actions:
+    depends_on:
+      datahub-gms:
+        condition: service_healthy
+    environment:
+      - ACTIONS_CONFIG=${ACTIONS_CONFIG:-}
+      - ACTIONS_EXTRA_PACKAGES=${ACTIONS_EXTRA_PACKAGES:-}
+      - DATAHUB_GMS_HOST=datahub-gms
+      - DATAHUB_GMS_PORT=8080
+      - DATAHUB_GMS_PROTOCOL=http
+      - DATAHUB_SYSTEM_CLIENT_ID=__datahub_system
+      - DATAHUB_SYSTEM_CLIENT_SECRET=JohnSnowKnowsNothing
+      - KAFKA_BOOTSTRAP_SERVER=kafka:9094
+      - KAFKA_PROPERTIES_SECURITY_PROTOCOL=PLAINTEXT
+      - METADATA_AUDIT_EVENT_NAME=MetadataAuditEvent_v4
+      - METADATA_CHANGE_LOG_VERSIONED_TOPIC_NAME=MetadataChangeLog_Versioned_v1
+      - SCHEMA_REGISTRY_URL=http://schema-registry:8081
+    hostname: actions
+    image: ${DATAHUB_ACTIONS_IMAGE:-acryldata/datahub-actions}:${DATAHUB_VERSION:-v1.1.0}-slim
+  datahub-frontend-react:
+    depends_on:
+      datahub-gms:
+        condition: service_healthy
+    environment:
+      - DATAHUB_GMS_HOST=datahub-gms
+      - DATAHUB_GMS_PORT=8080
+      - DATAHUB_SECRET=YouKnowNothing
+      - DATAHUB_APP_VERSION=1.0
+      - DATAHUB_PLAY_MEM_BUFFER_SIZE=10MB
+      - JAVA_OPTS=-Xms512m -Xmx512m -Dhttp.port=9002 -Dconfig.file=datahub-frontend/conf/application.conf -Djava.security.auth.login.config=datahub-frontend/conf/jaas.conf -Dlogback.configurationFile=datahub-frontend/conf/logback.xml -Dlogback.debug=false -Dpidfile.path=/dev/null
+      - KAFKA_BOOTSTRAP_SERVER=kafka:9094
+      - DATAHUB_TRACKING_TOPIC=DataHubUsageEvent_v1
+      - ELASTIC_CLIENT_HOST=elasticsearch
+      - ELASTIC_CLIENT_PORT=9200
+    hostname: datahub-frontend-react
+    image: ${DATAHUB_FRONTEND_IMAGE:-acryldata/datahub-frontend-react}:${DATAHUB_VERSION:-v1.1.0}
+    ports:
+      - ${DATAHUB_MAPPED_FRONTEND_PORT:-9002}:9002
+  datahub-gms:
+    depends_on:
+      datahub-upgrade:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+    environment:
+      - DATAHUB_DEBUG=true
+      - JAVA_OPTS=-Xms1g -Xmx1g -Dlogging.level.com.linkedin.gms=DEBUG
+      - DATAHUB_SERVER_TYPE=${DATAHUB_SERVER_TYPE:-quickstart}
+      - DATAHUB_TELEMETRY_ENABLED=${DATAHUB_TELEMETRY_ENABLED:-true}
+      - DATAHUB_UPGRADE_HISTORY_KAFKA_CONSUMER_GROUP_ID=generic-duhe-consumer-job-client-gms
+      - EBEAN_DATASOURCE_DRIVER=com.mysql.jdbc.Driver
+      - EBEAN_DATASOURCE_HOST=mysql:3306
+      - EBEAN_DATASOURCE_PASSWORD=datahub
+      - EBEAN_DATASOURCE_URL=jdbc:mysql://mysql:3306/datahub?verifyServerCertificate=false&useSSL=true&useUnicode=yes&characterEncoding=UTF-8&enabledTLSProtocols=TLSv1.2
+      - EBEAN_DATASOURCE_USERNAME=datahub
+      - ELASTICSEARCH_HOST=elasticsearch
+      - ELASTICSEARCH_INDEX_BUILDER_MAPPINGS_REINDEX=true
+      - ELASTICSEARCH_INDEX_BUILDER_SETTINGS_REINDEX=true
+      - ELASTICSEARCH_LIMIT_RESULTS_STRICT=true
+      - ELASTICSEARCH_PORT=9200
+      - ENTITY_REGISTRY_CONFIG_PATH=/datahub/datahub-gms/resources/entity-registry.yml
+      - ENTITY_SERVICE_ENABLE_RETENTION=true
+      - ES_BULK_REFRESH_POLICY=WAIT_UNTIL
+      - GRAPH_SERVICE_DIFF_MODE_ENABLED=true
+      - GRAPH_SERVICE_IMPL=${GRAPH_SERVICE_IMPL:-elasticsearch}
+      - KAFKA_BOOTSTRAP_SERVER=kafka:9094
+      - KAFKA_CONSUMER_STOP_ON_DESERIALIZATION_ERROR=${KAFKA_CONSUMER_STOP_ON_DESERIALIZATION_ERROR:-true}
+      - KAFKA_SCHEMAREGISTRY_URL=http://schema-registry:8081
+      - MAE_CONSUMER_ENABLED=true
+      - MCE_CONSUMER_ENABLED=true
+      - METADATA_SERVICE_AUTH_ENABLED=${METADATA_SERVICE_AUTH_ENABLED:-false}
+      - NEO4J_HOST=http://neo4j:7474
+      - NEO4J_PASSWORD=datahub
+      - NEO4J_URI=bolt://neo4j
+      - NEO4J_USERNAME=neo4j
+      - PE_CONSUMER_ENABLED=true
+      - THEME_V2_DEFAULT=true
+      - UI_INGESTION_ENABLED=true
+    healthcheck:
+      interval: 3s
+      retries: 10
+      start_period: 15s
+      test: curl -sS --fail http://datahub-gms:${DATAHUB_GMS_PORT:-8080}/health
+      timeout: 5s
+    hostname: datahub-gms
+    image: ${DATAHUB_GMS_IMAGE:-acryldata/datahub-gms}:${DATAHUB_VERSION:-v1.1.0}
+    ports:
+      - ${DATAHUB_MAPPED_GMS_PORT:-8080}:8080
+    volumes:
+      - ${HOME}/.datahub/plugins:/etc/datahub/plugins
+  datahub-upgrade:
+    command:
+      - -u
+      - SystemUpdate
+    depends_on:
+      elasticsearch-setup:
+        condition: service_completed_successfully
+      kafka-setup:
+        condition: service_completed_successfully
+      mysql-setup:
+        condition: service_completed_successfully
+      neo4j:
+        condition: service_healthy
+    environment:
+      - BACKFILL_BROWSE_PATHS_V2=true
+      - DATAHUB_GMS_HOST=datahub-gms
+      - DATAHUB_GMS_PORT=8080
+      - EBEAN_DATASOURCE_DRIVER=com.mysql.jdbc.Driver
+      - EBEAN_DATASOURCE_HOST=mysql:3306
+      - EBEAN_DATASOURCE_PASSWORD=datahub
+      - EBEAN_DATASOURCE_URL=jdbc:mysql://mysql:3306/datahub?verifyServerCertificate=false&useSSL=true&useUnicode=yes&characterEncoding=UTF-8
+      - EBEAN_DATASOURCE_USERNAME=datahub
+      - ELASTICSEARCH_BUILD_INDICES_CLONE_INDICES=false
+      - ELASTICSEARCH_HOST=elasticsearch
+      - ELASTICSEARCH_INDEX_BUILDER_MAPPINGS_REINDEX=true
+      - ELASTICSEARCH_INDEX_BUILDER_SETTINGS_REINDEX=true
+      - ELASTICSEARCH_PORT=9200
+      - ENTITY_REGISTRY_CONFIG_PATH=/datahub/datahub-gms/resources/entity-registry.yml
+      - GRAPH_SERVICE_IMPL=${GRAPH_SERVICE_IMPL:-elasticsearch}
+      - KAFKA_BOOTSTRAP_SERVER=kafka:9094
+      - KAFKA_SCHEMAREGISTRY_URL=http://schema-registry:8081
+      - REPROCESS_DEFAULT_BROWSE_PATHS_V2=false
+    hostname: datahub-upgrade
+    image: ${DATAHUB_UPGRADE_IMAGE:-acryldata/datahub-upgrade}:${DATAHUB_VERSION:-v1.1.0}
+    labels:
+      datahub_setup_job: true
+  elasticsearch:
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      - discovery.type=single-node
+      - ${XPACK_SECURITY_ENABLED:-xpack.security.enabled=false}
+      - ES_JAVA_OPTS=-Xms256m -Xmx512m -Dlog4j2.formatMsgNoLookups=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m -Dlog4j2.formatMsgNoLookups=true
+    healthcheck:
+      interval: 1s
+      retries: 3
+      start_period: 20s
+      test: curl -sS --fail http://elasticsearch:$${DATAHUB_ELASTIC_PORT:-9200}/_cluster/health?wait_for_status=yellow&timeout=0s
+      timeout: 5s
+    hostname: elasticsearch
+    image: ${DATAHUB_SEARCH_IMAGE:-elasticsearch}:${DATAHUB_SEARCH_TAG:-7.10.1}
+    ports:
+      - ${DATAHUB_MAPPED_ELASTIC_PORT:-9200}:9200
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+  elasticsearch-setup:
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ELASTICSEARCH_USE_SSL=${ELASTICSEARCH_USE_SSL:-false}
+      - USE_AWS_ELASTICSEARCH=${USE_AWS_ELASTICSEARCH:-false}
+      - ELASTICSEARCH_HOST=elasticsearch
+      - ELASTICSEARCH_PORT=9200
+      - ELASTICSEARCH_PROTOCOL=http
+    hostname: elasticsearch-setup
+    image: ${DATAHUB_ELASTIC_SETUP_IMAGE:-acryldata/datahub-elasticsearch-setup}:${DATAHUB_VERSION:-v1.1.0}
+    labels:
+      datahub_setup_job: true
+  kafka-setup:
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    environment:
+      - DATAHUB_PRECREATE_TOPICS=${DATAHUB_PRECREATE_TOPICS:-false}
+      - KAFKA_BOOTSTRAP_SERVER=kafka:9094
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      - USE_CONFLUENT_SCHEMA_REGISTRY=TRUE
+    hostname: kafka-setup
+    image: ${DATAHUB_KAFKA_SETUP_IMAGE:-acryldata/datahub-kafka-setup}:${DATAHUB_VERSION:-v1.1.0}
+    labels:
+      datahub_setup_job: true
+  mysql:
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_bin --default-authentication-plugin=mysql_native_password
+    environment:
+      - MYSQL_DATABASE=datahub
+      - MYSQL_USER=datahub
+      - MYSQL_PASSWORD=datahub
+      - MYSQL_ROOT_PASSWORD=datahub
+      - MYSQL_ROOT_HOST=%
+    healthcheck:
+      interval: 1s
+      retries: 3
+      start_period: 10s
+      test: mysqladmin ping -h mysql -u $$MYSQL_USER --password=$$MYSQL_PASSWORD
+      timeout: 5s
+    hostname: mysql
+    image: mysql:${DATAHUB_MYSQL_VERSION:-8.2}
+    ports:
+      - ${DATAHUB_MAPPED_MYSQL_PORT:-3306}:3306
+    restart: on-failure
+    volumes:
+      - mysqldata:/var/lib/mysql
+  mysql-setup:
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USERNAME=datahub
+      - MYSQL_PASSWORD=datahub
+      - DATAHUB_DB_NAME=datahub
+    hostname: mysql-setup
+    image: ${DATAHUB_MYSQL_SETUP_IMAGE:-acryldata/datahub-mysql-setup}:${DATAHUB_VERSION:-v1.1.0}
+    labels:
+      datahub_setup_job: true
+  neo4j:
+    environment:
+      - NEO4J_AUTH=neo4j/datahub
+      - NEO4J_dbms_default__database=graph.db
+      - NEO4J_dbms_allow__upgrade=true
+      - NEO4JLABS_PLUGINS=["apoc"]
+    healthcheck:
+      interval: 1s
+      retries: 5
+      start_period: 5s
+      test: wget http://neo4j:$${DATAHUB_NEO4J_HTTP_PORT:-7474}
+      timeout: 5s
+    hostname: neo4j
+    image: neo4j:4.4.9-community
+    ports:
+      - ${DATAHUB_MAPPED_NEO4J_HTTP_PORT:-7474}:7474
+      - ${DATAHUB_MAPPED_NEO4J_BOLT_PORT:-7687}:7687
+    volumes:
+      - neo4jdata:/data
+
+  request-logger-proxy:
+    image: nginx:1.27
+    container_name: request-logger-proxy
+    networks:
+      - default
+    depends_on:
+      datahub-gms:
+        condition: service_healthy
+    restart: on-failure
+    command: | # Code generted by Gemini, but it works. Feel free to help me improve it.
+      sh -c "
+        echo '
+        events { worker_connections 1024; }
+        http {
+            # --- MOVED INSIDE HTTP BLOCK ---
+            log_format post_body_json escape=json \"{\\\"time\\\":\\\"$$time_iso8601\\\",\\\"remote_addr\\\":\\\"$$remote_addr\\\",\\\"request\\\":\\\"$$request\\\",\\\"status\\\":$$status,\\\"body_bytes_sent\\\":$$body_bytes_sent,\\\"request_time\\\":$$request_time,\\\"http_referer\\\":\\\"$$http_referer\\\",\\\"http_user_agent\\\":\\\"$$http_user_agent\\\",\\\"request_body\\\":$$request_body}\";
+            client_body_in_single_buffer on;
+            # --- END OF MOVED SECTION ---
+
+            # Define a server that will act as our proxy
+            server {
+                listen 80;
+      
+                # Log all requests to stdout using our custom JSON format
+                access_log /dev/stdout post_body_json;
+                error_log /dev/stderr;
+      
+                # For every request, forward it to the datahub-gms service
+                location / {
+                    proxy_pass http://datahub-gms:8080;
+                    proxy_set_header Host $$host;
+                    proxy_set_header X-Real-IP $$remote_addr;
+                    proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $$scheme;
+                }
+            }
+        }
+        ' > /etc/nginx/nginx.conf && nginx -g 'daemon off;'
+      "
+volumes:
+  kafka_data: null
+  esdata: null
+  mysqldata: null
+  neo4jdata: null
