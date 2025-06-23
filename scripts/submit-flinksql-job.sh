@@ -17,7 +17,9 @@ echo "Session Handle: ${SESSION_HANDLE}"
 # --- Function to submit SQL statements from a file ---
 submit_sql_from_file() {
   local filename="$1"
-  local filepath="flinksql/${filename}" # Construct the full path to the file
+  local script_dir
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  local filepath="${script_dir}/flinksql/${filename}"
 
   if [ ! -f "$filepath" ]; then
     echo "Error: SQL file not found: ${filepath}"
@@ -28,7 +30,6 @@ submit_sql_from_file() {
   SQL_STATEMENT=$(cat "$filepath")
   echo "SQL Statement: ${SQL_STATEMENT}"
 
-  # Properly escape the SQL statement for JSON using jq
   JSON_PAYLOAD=$(jq -n --arg stmt "$SQL_STATEMENT" '{statement: $stmt}')
 
   curl -X POST \
