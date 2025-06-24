@@ -117,7 +117,7 @@ is broken. The workaround is to only keep the connection running for the START e
 Another approach is to increase the `openlineage.trackingIntervalInSeconds` in the openlineage config to some absurd value,
 but this would produce very unexpected results if anyone used that code.
 
-I'll add the github issue link here once I create it.
+Bug ticket: https://github.com/datahub-project/datahub/issues/13854
 
 ## Custom-built openlineage-flink jar
 
@@ -126,4 +126,5 @@ to openlineage-flink already, but isn't released yet.
 
 Code it's built from is published on Github as a PR to the OpenLineage project:
 https://github.com/OpenLineage/OpenLineage/pull/3799
+The change has already been merged to main, so with the next release it won't require a custom jar anymore.
 
