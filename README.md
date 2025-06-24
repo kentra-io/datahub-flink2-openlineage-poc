@@ -119,6 +119,10 @@ but this would produce very unexpected results if anyone used that code.
 
 Bug ticket: https://github.com/datahub-project/datahub/issues/13854
 
+### Workaround
+In production environment you can use the request-logger-proxy to forward only START events and not RUNNING events. Only 
+the RUNNING events break the graph, and if you want the lineage only - all you need is the START event.
+
 ## Custom-built openlineage-flink jar
 
 This project contains a custom-built openlineage-flink jar containing a bugfix that makes it possible. It's been merged
